@@ -424,6 +424,37 @@ func (c *Conn) Send(destination, contentType string, body []byte, opts ...func(*
 	return nil
 }
 
+func (c *Conn) SendSync(destination, contentType string, body []byte, opts ...func(*frame.Frame) error) error {
+	if c.closed {
+		return ErrAlreadyClosed
+	}
+
+	f, err := createSendFrameSync(destination, contentType, body, opts)
+	if err != nil {
+		return err
+	}
+
+	if _, ok := f.Header.Contains(frame.Receipt); ok {
+		// receipt required
+		request := writeRequest{
+			Frame: f,
+			C:     make(chan *frame.Frame),
+		}
+
+		c.writeCh <- request
+		response := <-request.C
+		if response.Command != frame.RECEIPT {
+			return newError(response)
+		}
+	} else {
+		// no receipt required
+		request := writeRequest{Frame: f}
+		c.writeCh <- request
+	}
+
+	return nil
+}
+
 func createSendFrame(destination, contentType string, body []byte, opts []func(*frame.Frame) error) (*frame.Frame, error) {
 	// Set the content-length before the options, because this provides
 	// an opportunity to remove content-length.
@@ -440,6 +471,31 @@ func createSendFrame(destination, contentType string, body []byte, opts []func(*
 	}
 
 	f.Header.Set(frame.Destination, destination)
+
+	if contentType != "" {
+		f.Header.Set(frame.ContentType, contentType)
+	}
+
+	return f, nil
+}
+
+func createSendFrameSync(destination, contentType string, body []byte, opts []func(*frame.Frame) error) (*frame.Frame, error) {
+	// Set the content-length before the options, because this provides
+	// an opportunity to remove content-length.
+	f := frame.New(frame.SEND, frame.ContentLength, strconv.Itoa(len(body)))
+	f.Body = body
+
+	for _, opt := range opts {
+		if opt == nil {
+			return nil, ErrNilOption
+		}
+		if err := opt(f); err != nil {
+			return nil, err
+		}
+	}
+
+	f.Header.Set(frame.Destination, destination)
+	f.Header.Set(frame.Receipt, "receip")
 
 	if contentType != "" {
 		f.Header.Set(frame.ContentType, contentType)
